@@ -1,0 +1,89 @@
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHON_VERSION: "3.12"
+
+cache:
+  paths:
+    - .cache/pip/
+    - .pytest_cache/
+
+lint:
+  stage: lint
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install ruff
+  script:
+    - python -m ruff check EmailResponse.py test_email_agent.py
+
+test:
+  stage: test
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install pytest
+  script:
+    - python -m pytest test_email_agent.py -v
+
+build-image:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE:latest"
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+deploy-openshift:
+  stage: deploy
+  image: registry.redhat.io/openshift4/ose-cli:latest
+  before_script:
+    - oc login --token="$OPENSHIFT_TOKEN" --server="$OPENSHIFT_SERVER"
+    - oc project "$OPENSHIFT_PROJECT"
+  script:
+    - |
+      if oc get deployment email-response-agent; then
+        oc set image deployment/email-response-agent email-response-agent="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+      else
+        oc new-app "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" --name=email-response-agent
+      fi
+    - oc expose deployment/email-response-agent --port=8080 --target-port=8080 || true
+    - |
+      if [ -n "$CI_REGISTRY_USER" ] && [ -n "$CI_REGISTRY_PASSWORD" ]; then
+        oc create secret docker-registry gitlab-registry \
+          --docker-server="$CI_REGISTRY" \
+          --docker-username="$CI_REGISTRY_USER" \
+          --docker-password="$CI_REGISTRY_PASSWORD" \
+          --dry-run=client -o yaml | oc apply -f -
+        oc set image-pull-secrets deployment/email-response-agent gitlab-registry || true
+      fi
+    - oc set probe deployment/email-response-agent --readiness --get-url=http://:8080/health || true
+    - oc set probe deployment/email-response-agent --liveness --get-url=http://:8080/health || true
+    - >
+      oc set env deployment/email-response-agent
+      EMAIL_AGENT_DAEMON=true
+      HEALTH_PORT=8080
+      MSGRAPH_TENANT_ID="$MSGRAPH_TENANT_ID"
+      MSGRAPH_CLIENT_ID="$MSGRAPH_CLIENT_ID"
+      MSGRAPH_CLIENT_SECRET="$MSGRAPH_CLIENT_SECRET"
+      MSGRAPH_USER_EMAIL="$MSGRAPH_USER_EMAIL"
+    - oc rollout status deployment/email-response-agent
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual

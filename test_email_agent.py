@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import patch, MagicMock
-import io
 
 import EmailResponse
 
@@ -204,7 +203,7 @@ class EmailAgentTests(unittest.TestCase):
         mock_msg.tool_calls = None
         mock_call_llm.return_value = mock_msg
         
-        reply = EmailResponse.answer_email(thread_content)
+        EmailResponse.answer_email(thread_content)
         
         mock_call_llm.assert_called_once()
         called_args = mock_call_llm.call_args[0]

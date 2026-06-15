@@ -16,6 +16,7 @@ The project is designed for teams that need a lightweight, script-based email as
 - Marks messages as read or tags them with `AgentDrafted` to avoid duplicate processing
 - Applies token-bucket rate limiting to Microsoft Graph API calls
 - Exposes Prometheus-compatible metrics through `/health` in daemon mode
+- Provides a Dockerfile and GitLab CI template for OpenShift container deployments
 - Uses structured JSON logging for production debugging
 
 ## Requirements
@@ -96,6 +97,17 @@ In daemon mode, the process polls the inbox on a fixed interval and serves Prome
 http://localhost:8080/health
 ```
 
+### Container/OpenShift Mode
+
+The included Dockerfile runs the application with Gunicorn on port `8080`. Set `EMAIL_AGENT_DAEMON=true` plus the Microsoft Graph environment variables to run inbox polling from the container health endpoint process:
+
+```bash
+docker build -t email-response-agent .
+docker run --rm -p 8080:8080 --env-file .env email-response-agent
+```
+
+The GitLab CI template builds the image, pushes it to the GitLab registry, and includes a manual OpenShift deployment job that updates or creates `deployment/email-response-agent`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and update the values for your environment:
@@ -110,6 +122,7 @@ cp .env.example .env
 |---|---:|---|
 | `VLLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible API base URL |
 | `VLLM_MODEL` | `Qwen/Qwen3.6-27B` | Model name used for email processing |
+| `PORT` | `8080` | Container/OpenShift health endpoint port |
 | `OPENAI_API_KEY` | `EMPTY` | API key for the OpenAI-compatible endpoint |
 | `MAX_RETRIES` | `2` | Number of retry attempts for LLM API failures |
 | `RETRY_DELAY_SECONDS` | `60` | Delay between LLM retry attempts |
@@ -135,6 +148,13 @@ cp .env.example .env
 | `MSGRAPH_RATE_LIMIT_REFILL_PER_SEC` | `1.0` | Token refill rate per second |
 | `HEALTH_PORT` | `8080` | Port for the `/health` Prometheus metrics endpoint |
 | `POLL_INTERVAL_SECONDS` | `60` | Daemon polling interval in seconds |
+| `EMAIL_AGENT_DAEMON` | `False` | Start background inbox polling when the container/Wsgi app starts |
+| `EMAIL_AGENT_AUTO_REPLY` | `False` | Container override for automatic draft/reply creation |
+| `EMAIL_AGENT_CREATE_DRAFT` | `True` | Container override for draft-vs-send behavior |
+| `EMAIL_AGENT_MARK_READ` | `False` | Container override for read-vs-category processing |
+| `EMAIL_AGENT_LIMIT` | `10` | Container override for messages processed per polling iteration |
+| `EMAIL_AGENT_TIME_WINDOW_MINUTES` | `5` | Container override for received-time filter |
+| `EMAIL_AGENT_POLL_INTERVAL_SECONDS` | `60` | Container override for polling interval |
 
 ## Command-Line Options
 

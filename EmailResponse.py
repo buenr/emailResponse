@@ -23,6 +23,7 @@ import msal
 import requests
 import structlog
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
+from flask import Flask, Response
 
 logger = structlog.get_logger()
 
@@ -37,6 +38,103 @@ METRICS_PROCESSED = Counter("email_requests_processed_total", "Total number of e
 METRICS_REPLIED = Counter("email_replies_created_total", "Total number of replies/drafts created")
 METRICS_FAILED = Counter("email_requests_failed_total", "Total number of failed email processing attempts")
 METRICS_API_CALLS = Counter("msgraph_api_calls_total", "Total number of MS Graph API calls")
+
+
+def setup_logging() -> None:
+    """Configure structured JSON logging."""
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.processors.JSONRenderer()
+        ],
+        logger_factory=structlog.PrintLoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    )
+    logging.basicConfig(level=logging.INFO)
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).lower() in ("true", "1", "yes", "on")
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def load_daemon_config() -> dict:
+    required = {
+        "tenant_id": os.getenv("MSGRAPH_TENANT_ID"),
+        "client_id": os.getenv("MSGRAPH_CLIENT_ID"),
+        "client_secret": os.getenv("MSGRAPH_CLIENT_SECRET"),
+        "user_email": os.getenv("MSGRAPH_USER_EMAIL"),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    return {
+        "tenant_id": required["tenant_id"],
+        "client_id": required["client_id"],
+        "client_secret": required["client_secret"],
+        "user_email": required["user_email"],
+        "auto_reply": env_bool("EMAIL_AGENT_AUTO_REPLY", env_bool("MSGRAPH_AUTO_REPLY", False)),
+        "mark_read": env_bool("EMAIL_AGENT_MARK_READ", env_bool("MSGRAPH_MARK_AS_READ", False)),
+        "create_draft": env_bool("EMAIL_AGENT_CREATE_DRAFT", env_bool("MSGRAPH_CREATE_DRAFT", True)),
+        "limit": env_int("EMAIL_AGENT_LIMIT", 10),
+        "time_window_minutes": env_int("EMAIL_AGENT_TIME_WINDOW_MINUTES", env_int("MSGRAPH_TIME_WINDOW_MINUTES", 5)),
+        "poll_interval_seconds": env_int("EMAIL_AGENT_POLL_INTERVAL_SECONDS", env_int("POLL_INTERVAL_SECONDS", 60)),
+    }
+
+
+def start_daemon_thread(config: dict) -> threading.Thread:
+    def run_daemon() -> None:
+        while True:
+            try:
+                process_msgraph_inbox(
+                    tenant_id=config["tenant_id"],
+                    client_id=config["client_id"],
+                    client_secret=config["client_secret"],
+                    user_email=config["user_email"],
+                    auto_reply=config["auto_reply"],
+                    mark_read=config["mark_read"],
+                    create_draft=config["create_draft"],
+                    limit=config["limit"],
+                    time_window_minutes=config["time_window_minutes"],
+                )
+            except Exception as e:
+                logger.error("Daemon iteration failed", error=str(e))
+            time.sleep(config["poll_interval_seconds"])
+
+    thread = threading.Thread(target=run_daemon, daemon=True)
+    thread.start()
+    return thread
+
+
+def create_app(start_daemon: bool | None = None) -> Flask:
+    setup_logging()
+    app = Flask(__name__)
+
+    @app.route("/health")
+    def health_check():
+        return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+
+    if start_daemon is None:
+        start_daemon = env_bool("EMAIL_AGENT_DAEMON", False)
+
+    if start_daemon:
+        config = load_daemon_config()
+        daemon_thread = start_daemon_thread(config)
+        logger.info("Started background MS Graph daemon", thread_id=daemon_thread.ident)
+
+    return app
+
+
+app = create_app()
+
 
 @dataclass
 class RateLimiter:
@@ -78,19 +176,6 @@ class RateLimiter:
             self.tokens -= 1
             METRICS_API_CALLS.inc()
             yield
-
-def setup_logging() -> None:
-    """Configure structured JSON logging."""
-    structlog.configure(
-        processors=[
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.add_log_level,
-            structlog.processors.JSONRenderer()
-        ],
-        logger_factory=structlog.PrintLoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-    )
-    logging.basicConfig(level=logging.INFO)
 
 def load_rate_limiter_config() -> RateLimiter:
     """Load rate limiter configuration from environment."""
@@ -492,7 +577,7 @@ def answer_email(email_text: str, attachments: Optional[list] = None) -> str:
     if image_descriptions:
         combined_text += f"\n\n{image_descriptions}"
     if attachment_texts:
-        combined_text += f"\n\nAttachment contents:\n" + "\n".join(attachment_texts)
+        combined_text += "\n\nAttachment contents:\n" + "\n".join(attachment_texts)
 
     client = OpenAI(
         api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
@@ -722,7 +807,7 @@ def main() -> None:
     parser.add_argument("--mark-read", action="store_true", default=os.getenv("MSGRAPH_MARK_AS_READ", "False").lower() in ("true", "1", "yes"), help="Mark processed emails as read. (Default: False, keeps them unread and tags as 'AgentDrafted').")
     parser.add_argument("--limit", type=int, default=10, help="Maximum number of messages to process.")
     parser.add_argument("--time-window-minutes", type=int, default=int(os.getenv("MSGRAPH_TIME_WINDOW_MINUTES", "5")), help="Only process emails received in the last X minutes (default: 5, 0 for no time filter).")
-    parser.add_argument("--health-port", type=int, default=int(os.getenv("HEALTH_PORT", "8080")), help="Port for health check HTTP endpoint.")
+    parser.add_argument("--health-port", type=int, default=int(os.getenv("PORT", os.getenv("HEALTH_PORT", "8080"))), help="Port for health check HTTP endpoint.")
     parser.add_argument("--daemon", action="store_true", help="Run in daemon mode, continuously processing inbox.")
     parser.add_argument("--poll-interval", type=int, default=int(os.getenv("POLL_INTERVAL_SECONDS", "60")), help="Polling interval in daemon mode (seconds).")
     
@@ -735,35 +820,7 @@ def main() -> None:
         setup_logging()
         logger.info("Starting MS Graph email agent")
         
-        from flask import Flask, Response
-        
-        app = Flask(__name__)
-        
-        @app.route("/health")
-        def health_check():
-            return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
-        
-        def run_daemon():
-            while True:
-                try:
-                    process_msgraph_inbox(
-                        tenant_id=args.tenant_id,
-                        client_id=args.client_id,
-                        client_secret=args.client_secret,
-                        user_email=args.user_email,
-                        auto_reply=args.auto_reply,
-                        mark_read=args.mark_read,
-                        create_draft=args.create_draft,
-                        limit=args.limit,
-                        time_window_minutes=args.time_window_minutes
-                    )
-                except Exception as e:
-                    logger.error("Daemon iteration failed", error=str(e))
-                time.sleep(args.poll_interval)
-        
-        daemon_thread = threading.Thread(target=run_daemon, daemon=True)
-        daemon_thread.start()
-        
+        app = create_app()
         logger.info(f"Starting health endpoint on port {args.health_port}")
         app.run(host="0.0.0.0", port=args.health_port)
     else:

@@ -1,3 +1,5 @@
+.git/
+.gitlab-ci.yml
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -5,6 +7,10 @@ __pycache__/
 .venv/
 .venv_linux/
 .env
+.env.*
+!.env.example
 .vscode/
 .idea/
+.kilo/
+.cache/
 token_cache.bin
