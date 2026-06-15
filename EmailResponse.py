@@ -530,92 +530,36 @@ def answer_email(email_text: str, attachments: Optional[list] = None) -> str:
 def get_ms_graph_token(
     tenant_id: str,
     client_id: str,
-    client_secret: Optional[str] = None,
-    use_device_code: bool = False,
+    client_secret: str,
 ) -> str:
-    """Acquire an access token for Microsoft Graph using MSAL."""
+    """Acquire an access token for Microsoft Graph using MSAL with Client Credentials flow."""
     authority = f"https://login.microsoftonline.com/{tenant_id}"
     
-    # If client_secret is provided and we aren't explicitly forcing device code flow,
-    # try ConfidentialClientApplication (Client Credentials/Daemon flow).
-    if client_secret and not use_device_code:
-        logger.info("Authenticating via ConfidentialClientApplication (Client Credentials flow)...")
-        app = msal.ConfidentialClientApplication(
-            client_id,
-            authority=authority,
-            client_credential=client_secret
-        )
-        # For client credentials, the scope is always https://graph.microsoft.com/.default
-        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        if "access_token" in result:
-            return result["access_token"]
-        else:
-            error_msg = result.get("error_description") or result.get("error", "Unknown error")
-            raise ValueError(f"Failed to acquire token via client credentials: {error_msg}")
-            
-    # Otherwise, use PublicClientApplication with token caching and device code flow.
+    logger.info("Authenticating via ConfidentialClientApplication (Client Credentials flow)...")
+    app = msal.ConfidentialClientApplication(
+        client_id,
+        authority=authority,
+        client_credential=client_secret
+    )
+    # For client credentials, the scope is always https://graph.microsoft.com/.default
+    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    if "access_token" in result:
+        return result["access_token"]
     else:
-        logger.info("Authenticating via PublicClientApplication (Device Code flow)...")
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_cache.bin")
-        cache = msal.SerializableTokenCache()
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "r") as f:
-                    cache.deserialize(f.read())
-            except Exception as e:
-                logger.warning(f"Failed to deserialize token cache: {e}")
-                
-        app = msal.PublicClientApplication(
-            client_id,
-            authority=authority,
-            token_cache=cache
-        )
-        
-        # Try silent acquisition from cache
-        accounts = app.get_accounts()
-        result = None
-        scopes = ["https://graph.microsoft.com/Mail.ReadWrite", "https://graph.microsoft.com/Mail.Send"]
-        
-        if accounts:
-            logger.info(f"Found account in cache: {accounts[0]['username']}. Attempting silent token acquisition...")
-            result = app.acquire_token_silent(scopes=scopes, account=accounts[0])
-            
-        if not result:
-            logger.info("Token not found or expired. Initiating Device Code Flow...")
-            flow = app.initiate_device_flow(scopes=scopes)
-            if "message" not in flow:
-                raise ValueError(f"Failed to initiate device flow: {flow.get('error_description', 'Unknown error')}")
-            
-            # Print the user-facing instruction to authenticate
-            print("\n" + "="*80)
-            print(flow["message"])
-            print("="*80 + "\n")
-            
-            result = app.acquire_token_by_device_flow(flow)
-            
-        if result and "access_token" in result:
-            if cache.has_state_changed:
-                try:
-                    with open(cache_path, "w") as f:
-                        f.write(cache.serialize())
-                except Exception as e:
-                    logger.warning(f"Failed to save token cache: {e}")
-            return result["access_token"]
-        else:
-            error_msg = result.get("error_description") or result.get("error", "Unknown error")
-            raise ValueError(f"Failed to acquire token via device code: {error_msg}")
+        error_msg = result.get("error_description") or result.get("error", "Unknown error")
+        raise ValueError(f"Failed to acquire token via client credentials: {error_msg}")
 
 
 def process_msgraph_inbox(
     tenant_id: str,
     client_id: str,
-    client_secret: Optional[str] = None,
-    user_email: Optional[str] = None,
-    use_device_code: bool = False,
+    client_secret: str,
+    user_email: str,
     auto_reply: bool = False,
     mark_read: bool = False,
     create_draft: bool = True,
     limit: int = 10,
+    time_window_minutes: int = 5,
 ) -> None:
     """Read unread messages from MS Graph inbox, run them through LLM, and reply/draft if configured."""
     setup_logging()
@@ -625,7 +569,6 @@ def process_msgraph_inbox(
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret,
-            use_device_code=use_device_code
         )
     except Exception as e:
         logger.error("Authentication failed", error=str(e))
@@ -637,28 +580,27 @@ def process_msgraph_inbox(
         "Content-Type": "application/json"
     }
 
-    if user_email:
-        base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}"
-    else:
-        if not client_secret or use_device_code:
-            base_url = "https://graph.microsoft.com/v1.0/me"
-        else:
-            logger.error("Client credentials flow requires a user_email/UPN to access a specific mailbox.")
-            METRICS_FAILED.inc()
-            return
-
-    inbox_url = f"{base_url}/mailFolders/inbox/messages"
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}"
     
     if mark_read:
         filter_query = "isRead eq false"
     else:
         filter_query = "isRead eq false and not(categories/any(c:c eq 'AgentDrafted'))"
+    
+    # Add time window filter for emails received in the last X minutes
+    if time_window_minutes and time_window_minutes > 0:
+        from datetime import datetime, timezone, timedelta
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
+        cutoff_iso = cutoff_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        filter_query = f"{filter_query} and receivedDateTime ge {cutoff_iso}"
 
     params = {
         "$filter": filter_query,
         "$orderby": "receivedDateTime desc",
         "$top": limit
     }
+
+    inbox_url = f"{base_url}/mailFolders/inbox/messages"
 
     logger.info("Fetching unread messages", url=inbox_url)
     try:
@@ -772,14 +714,14 @@ def main() -> None:
     parser.add_argument("--msgraph", action="store_true", help="Enable Microsoft Graph inbox processing mode.")
     parser.add_argument("--tenant-id", default=os.getenv("MSGRAPH_TENANT_ID"), help="Microsoft Entra tenant ID.")
     parser.add_argument("--client-id", default=os.getenv("MSGRAPH_CLIENT_ID"), help="Client (application) ID.")
-    parser.add_argument("--client-secret", default=os.getenv("MSGRAPH_CLIENT_SECRET"), help="Client secret.")
-    parser.add_argument("--user-email", default=os.getenv("MSGRAPH_USER_EMAIL"), help="Email/UPN of the inbox to process.")
-    parser.add_argument("--device-code", action="store_true", default=os.getenv("MSGRAPH_USE_DEVICE_CODE", "False").lower() in ("true", "1", "yes"), help="Force MSAL device code flow authentication.")
+    parser.add_argument("--client-secret", default=os.getenv("MSGRAPH_CLIENT_SECRET"), help="Client secret (required).")
+    parser.add_argument("--user-email", default=os.getenv("MSGRAPH_USER_EMAIL"), help="Email/UPN of the inbox to process (required).")
     parser.add_argument("--auto-reply", action="store_true", default=os.getenv("MSGRAPH_AUTO_REPLY", "False").lower() in ("true", "1", "yes"), help="Automatically generate draft or send replies.")
     parser.add_argument("--create-draft", action="store_true", default=os.getenv("MSGRAPH_CREATE_DRAFT", "True").lower() in ("true", "1", "yes"), help="Create a draft reply instead of sending directly. (Default: True).")
     parser.add_argument("--no-draft", action="store_false", dest="create_draft", help="Send replies directly instead of creating a draft.")
     parser.add_argument("--mark-read", action="store_true", default=os.getenv("MSGRAPH_MARK_AS_READ", "False").lower() in ("true", "1", "yes"), help="Mark processed emails as read. (Default: False, keeps them unread and tags as 'AgentDrafted').")
     parser.add_argument("--limit", type=int, default=10, help="Maximum number of messages to process.")
+    parser.add_argument("--time-window-minutes", type=int, default=int(os.getenv("MSGRAPH_TIME_WINDOW_MINUTES", "5")), help="Only process emails received in the last X minutes (default: 5, 0 for no time filter).")
     parser.add_argument("--health-port", type=int, default=int(os.getenv("HEALTH_PORT", "8080")), help="Port for health check HTTP endpoint.")
     parser.add_argument("--daemon", action="store_true", help="Run in daemon mode, continuously processing inbox.")
     parser.add_argument("--poll-interval", type=int, default=int(os.getenv("POLL_INTERVAL_SECONDS", "60")), help="Polling interval in daemon mode (seconds).")
@@ -787,8 +729,8 @@ def main() -> None:
     args = parser.parse_args()
     
     if args.msgraph:
-        if not args.tenant_id or not args.client_id:
-            parser.error("--tenant-id and --client-id are required for MS Graph mode (can also be set via env variables).")
+        if not args.tenant_id or not args.client_id or not args.client_secret or not args.user_email:
+            parser.error("--tenant-id, --client-id, --client-secret, and --user-email are required for MS Graph mode (can also be set via env variables).")
         
         setup_logging()
         logger.info("Starting MS Graph email agent")
@@ -809,11 +751,11 @@ def main() -> None:
                         client_id=args.client_id,
                         client_secret=args.client_secret,
                         user_email=args.user_email,
-                        use_device_code=args.device_code,
                         auto_reply=args.auto_reply,
                         mark_read=args.mark_read,
                         create_draft=args.create_draft,
-                        limit=args.limit
+                        limit=args.limit,
+                        time_window_minutes=args.time_window_minutes
                     )
                 except Exception as e:
                     logger.error("Daemon iteration failed", error=str(e))

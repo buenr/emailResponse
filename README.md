@@ -1,84 +1,208 @@
 # Email ETA Agent
 
-This repo now contains a small order-ETA reply agent.
+Email ETA Agent is a Python automation tool for shared Outlook inboxes. It reads incoming email requests, isolates the latest message in a thread, extracts text from attachments, uses an OpenAI-compatible LLM endpoint to determine whether the message is an order ETA request, and optionally creates a draft or sends a reply through Microsoft Graph.
 
-## Run it
+The project is designed for teams that need a lightweight, script-based email assistant with configurable authentication, retry behavior, rate limiting, structured logging, and Prometheus-compatible health metrics.
 
-```powershell
-"EmailResponse.py" "Hi, when will my order A-1042 arrive?"
-```
+## Features
 
-## Notes
+- Processes HTML and plain-text Outlook emails
+- Isolates the latest message in email threads
+- Extracts text from PDF, DOCX, Excel, and CSV attachments
+- Parses embedded HTML images through an OpenAI-compatible vision model
+- Uses a configurable LLM tool-calling workflow for ETA lookups
+- Supports Microsoft Graph mailbox access through Client Credentials Flow for daemon/service-principal authentication
+- Creates draft replies or sends replies directly
+- Marks messages as read or tags them with `AgentDrafted` to avoid duplicate processing
+- Applies token-bucket rate limiting to Microsoft Graph API calls
+- Exposes Prometheus-compatible metrics through `/health` in daemon mode
+- Uses structured JSON logging for production debugging
 
-- The current implementation uses a demo order ETA table for A-1042, B-7711, and C-2209.
-- If a local vLLM server is available, the script will try to use it first.
-- The agent should rely on the LLM path for all ETA responses; no deterministic fallback reply logic is used.
-- The agent handles HTML Outlook emails by stripping tags and extracting visible text.
-- The agent isolates the latest reply in email threads (supporting both HTML and plain text separators) to ignore historical messages and prevent false-positive ETA triggers.
-- The agent can extract text from email attachments (PDF, DOCX, Excel, CSV).
+## Requirements
 
-- The agent can parse embedded images in HTML emails using the vision model.
-- The agent implements retry logic for API calls to handle transient errors.
-- MS Graph calls are protected by a configurable token-bucket rate limiter to reduce 429 throttling.
-- The daemon exposes Prometheus metrics through `/health` and logs structured JSON events.
+- Python 3.11+
+- Microsoft Entra app registration with Microsoft Graph permissions
+- OpenAI-compatible API endpoint, such as a local vLLM server
 
-## Environment Variables
-
-To point the script at a different model endpoint, set:
-
-```powershell
-$env:VLLM_BASE_URL="http://localhost:8000/v1"
-$env:VLLM_MODEL="Qwen/Qwen3.6-27B"
-```
-
-To configure retry behavior, set:
-
-```powershell
-$env:MAX_RETRIES="2"
-$env:RETRY_DELAY_SECONDS="60"
-```
-
-- `MAX_RETRIES`: Number of retry attempts for API calls (default: 2)
-- `RETRY_DELAY_SECONDS`: Delay between retries in seconds (default: 60)
-- `MSGRAPH_RATE_LIMIT_TOKENS`: Maximum MS Graph token-bucket capacity (default: 10)
-- `MSGRAPH_RATE_LIMIT_REFILL_PER_SEC`: MS Graph token refill rate per second (default: 1.0)
-- `HEALTH_PORT`: Port for the `/health` Prometheus metrics endpoint (default: 8080)
-- `POLL_INTERVAL_SECONDS`: Daemon polling interval in seconds (default: 60)
-
-## Microsoft Graph Mode
-
-The agent can read unread emails from an Outlook inbox using the Microsoft Graph API, pass them through the LLM, print/log the generated reply, and optionally reply to the sender and mark the email as read.
-
-### Execution
+## Installation
 
 ```bash
-# Run in MS Graph mode (interactive Device Code Flow, default)
-python3 EmailResponse.py --msgraph --tenant-id "your-tenant-id" --client-id "your-client-id"
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # macOS/Linux
 
-# Run in MS Graph mode (unattended/daemon Client Credentials Flow)
-python3 EmailResponse.py --msgraph --tenant-id "your-tenant-id" --client-id "your-client-id" --client-secret "your-secret" --user-email "shared-inbox@company.com" --auto-reply --daemon --health-port 8080
+pip install -r requirements.txt
 ```
 
-### Authentication Flows Supported
+## Quick Test
 
-1. **Client Credentials Flow (Daemon App):** If you provide `--client-secret` (or set `MSGRAPH_CLIENT_SECRET`), the script will authenticate as a daemon app/service principal. Note: `--user-email` is required in this flow to specify whose mailbox to access.
-2. **Device Code Flow (Interactive User):** If no client secret is provided (or if `--device-code` is passed), the script will prompt with a device code link for authentication. Serialized tokens are cached in `token_cache.bin` to prevent repeated prompts.
+Run the local ETA demo without Microsoft Graph:
 
-### Command-line Arguments
+```bash
+python EmailResponse.py "Hi, when will my order A-1042 arrive?"
+```
 
-- `--msgraph`: Enables Microsoft Graph inbox processing.
-- `--tenant-id`: Microsoft Entra Tenant ID (can be set via `MSGRAPH_TENANT_ID`).
-- `--client-id`: Client/Application ID (can be set via `MSGRAPH_CLIENT_ID`).
-- `--client-secret`: Client Secret (can be set via `MSGRAPH_CLIENT_SECRET`).
-- `--user-email`: Email/UPN of the inbox to process (can be set via `MSGRAPH_USER_EMAIL`).
-- `--device-code`: Force MSAL Device Code Flow.
-- `--auto-reply`: Automatically generate draft or send replies (can be set via `MSGRAPH_AUTO_REPLY`).
-- `--create-draft`: Create a draft reply instead of sending directly. (Default: True, can be set via `MSGRAPH_CREATE_DRAFT`).
-- `--no-draft`: Send replies directly instead of creating drafts.
-- `--mark-read`: Mark processed emails as read. (Default: False, keeps them unread and tags them with the 'AgentDrafted' category to avoid duplicate processing. Can be set via `MSGRAPH_MARK_AS_READ`).
-- `--limit`: Max number of unread emails to process in a single run (default: 10).
-- `--health-port`: Port for the `/health` Prometheus metrics endpoint (default: 8080).
-- `--daemon`: Run continuously and poll the inbox on a fixed interval.
-- `--poll-interval`: Polling interval for daemon mode in seconds (default: 60).
+## Microsoft Graph Setup
 
+Create an app registration in Microsoft Entra ID and grant Microsoft Graph permissions:
 
+### Client Credentials Flow
+
+Use this mode for unattended daemon operation.
+
+Required application permissions:
+
+- `Mail.ReadWrite`
+- `Mail.Send`
+
+Admin consent is required.
+
+## Usage
+
+### Generate a Reply Locally
+
+```bash
+python EmailResponse.py "Hi, when will my order A-1042 arrive?"
+```
+
+### Process Microsoft Graph Inbox Once
+
+```bash
+python EmailResponse.py \
+  --msgraph \
+  --tenant-id "your-tenant-id" \
+  --client-id "your-client-id" \
+  --client-secret "your-secret" \
+  --user-email "shared-inbox@company.com"
+```
+
+### Run in Daemon Mode
+
+```bash
+python EmailResponse.py \
+  --msgraph \
+  --tenant-id "your-tenant-id" \
+  --client-id "your-client-id" \
+  --client-secret "your-secret" \
+  --user-email "shared-inbox@company.com" \
+  --auto-reply \
+  --daemon \
+  --health-port 8080
+```
+
+In daemon mode, the process polls the inbox on a fixed interval and serves Prometheus-compatible metrics at:
+
+```text
+http://localhost:8080/health
+```
+
+## Configuration
+
+Copy `.env.example` to `.env` and update the values for your environment:
+
+```bash
+cp .env.example .env
+```
+
+### LLM Configuration
+
+| Variable | Default | Description |
+|---|---:|---|
+| `VLLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible API base URL |
+| `VLLM_MODEL` | `Qwen/Qwen3.6-27B` | Model name used for email processing |
+| `OPENAI_API_KEY` | `EMPTY` | API key for the OpenAI-compatible endpoint |
+| `MAX_RETRIES` | `2` | Number of retry attempts for LLM API failures |
+| `RETRY_DELAY_SECONDS` | `60` | Delay between LLM retry attempts |
+
+### Microsoft Graph Configuration
+
+| Variable | Default | Description |
+|---|---:|---|
+| `MSGRAPH_TENANT_ID` | Required | Microsoft Entra tenant ID |
+| `MSGRAPH_CLIENT_ID` | Required | Application/client ID |
+| `MSGRAPH_CLIENT_SECRET` | Required | Client secret for Client Credentials flow |
+| `MSGRAPH_USER_EMAIL` | Required | Mailbox UPN or email address to process |
+| `MSGRAPH_AUTO_REPLY` | `False` | Create drafts or send replies automatically |
+| `MSGRAPH_CREATE_DRAFT` | `True` | Create draft replies instead of sending directly |
+| `MSGRAPH_MARK_AS_READ` | `False` | Mark processed messages as read |
+| `MSGRAPH_TIME_WINDOW_MINUTES` | `5` | Only process emails received in last X minutes (0 for no filter) |
+
+### Production Hardening
+
+| Variable | Default | Description |
+|---|---:|---|
+| `MSGRAPH_RATE_LIMIT_TOKENS` | `10` | Token-bucket capacity for Microsoft Graph API calls |
+| `MSGRAPH_RATE_LIMIT_REFILL_PER_SEC` | `1.0` | Token refill rate per second |
+| `HEALTH_PORT` | `8080` | Port for the `/health` Prometheus metrics endpoint |
+| `POLL_INTERVAL_SECONDS` | `60` | Daemon polling interval in seconds |
+
+## Command-Line Options
+
+| Option | Description |
+|---|---|
+| `--msgraph` | Enable Microsoft Graph inbox processing |
+| `--tenant-id` | Microsoft Entra tenant ID |
+| `--client-id` | Microsoft Graph application/client ID |
+| `--client-secret` | Client secret for Client Credentials flow |
+| `--user-email` | Mailbox UPN or email address to process |
+| `--auto-reply` | Create draft replies or send replies automatically |
+| `--create-draft` | Create draft replies instead of sending directly |
+| `--no-draft` | Send replies directly instead of creating drafts |
+| `--mark-read` | Mark processed emails as read |
+| `--time-window-minutes` | Only process emails received in last X minutes (default: 5) |
+| `--limit` | Maximum number of unread messages to process per run |
+| `--health-port` | Port for the `/health` endpoint |
+| `--daemon` | Continuously poll the inbox |
+| `--poll-interval` | Polling interval for daemon mode |
+
+## Processing Behavior
+
+When Microsoft Graph processing is enabled, the agent:
+
+1. Authenticates with Microsoft Graph using Client Credentials flow.
+2. Fetches unread inbox messages received in the last 5 minutes (configurable).
+2. Fetches unread inbox messages.
+3. Filters out messages already tagged with `AgentDrafted` when `mark_read` is disabled.
+4. Fetches attachments for messages that contain them.
+5. Extracts the latest message from the email thread.
+6. Passes the cleaned email content and attachment text to the LLM.
+7. Generates a reply when the email is identified as an ETA or delivery-status request.
+8. Creates a draft, sends a reply, marks the message as read, or tags it as `AgentDrafted`, depending on configuration.
+
+## Observability
+
+The daemon exposes Prometheus-compatible counters through `/health`:
+
+- `email_requests_processed_total`
+- `email_replies_created_total`
+- `email_requests_failed_total`
+- `msgraph_api_calls_total`
+
+Logs are emitted as structured JSON events with timestamps, severity, and contextual fields.
+
+## Testing
+
+Run the test suite:
+
+```bash
+python -m pytest test_email_agent.py -v
+```
+
+Run a single test:
+
+```bash
+python -m pytest test_email_agent.py::EmailAgentTests::test_strip_html_tags -v
+```
+
+Tests mock Microsoft Graph, MSAL, requests, and OpenAI client calls. No external network access is required.
+
+## Security Notes
+
+- Do not commit `.env`, credentials, or client secrets.
+- `.gitignore` excludes local virtual environments, Python caches, pytest caches, and token cache files.
+- Use client secrets and tokens only through environment variables or a secure secret manager.
+- Prefer least-privilege Microsoft Graph permissions for production deployments.
+
+## License
+
+This repository does not declare a license. Add an explicit license before distributing the project outside your organization.
