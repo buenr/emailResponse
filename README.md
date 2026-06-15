@@ -225,4 +225,4 @@ Tests mock Microsoft Graph, MSAL, requests, and OpenAI client calls. No external
 
 ## License
 
-This repository does not declare a license. Add an explicit license before distributing the project outside your organization.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
