@@ -28,9 +28,9 @@ from flask import Flask, Response
 logger = structlog.get_logger()
 
 ORDER_ETA_DB = {
-    "A-1042": {"status": "Packed and ready to ship", "eta": "2 business days", "carrier": "UPS"},
-    "B-7711": {"status": "In transit", "eta": "5 business days", "carrier": "DHL"},
-    "C-2209": {"status": "Awaiting carrier scan", "eta": "3 business days", "carrier": "FedEx"},
+    "ABC1234": {"status": "Packed and ready to ship", "eta": "2 business days", "carrier": "UPS"},
+    "DEF5678": {"status": "In transit", "eta": "5 business days", "carrier": "DHL"},
+    "GHI9012": {"status": "Awaiting carrier scan", "eta": "3 business days", "carrier": "FedEx"},
 }
 
 # Metrics counters
@@ -211,27 +211,27 @@ TOOLS = [
                 "properties": {
                     "orders": {
                         "type": "array",
-                        "description": "List of order numbers to check.",
+                        "description": "List of order numbers to check. Pattern: 3 uppercase letters followed by 4 digits (e.g., ABC1234).",
                         "items": {"type": "string"},
                     },
                     "trucks": {
                         "type": "array",
-                        "description": "List of truck codes to check.",
+                        "description": "List of truck codes to check. Pattern: Exactly 6 alphanumeric characters (e.g., ABC123). Must be distinguished from trailer codes by email context.",
                         "items": {"type": "string"},
                     },
                     "trailers": {
                         "type": "array",
-                        "description": "List of trailer codes to check.",
+                        "description": "List of trailer codes to check. Pattern: Exactly 6 alphanumeric characters (e.g., XYZ789). Must be distinguished from truck codes by email context.",
                         "items": {"type": "string"},
                     },
                     "bols": {
                         "type": "array",
-                        "description": "List of BOL numbers to check.",
+                        "description": "List of BOL (Bill of Lading) numbers to check. Pattern: Alphanumeric codes with 8+ characters (e.g., BOL123456).",
                         "items": {"type": "string"},
                     },
                     "pos": {
                         "type": "array",
-                        "description": "List of purchase order numbers to check.",
+                        "description": "List of purchase order numbers to check. Pattern: Alphanumeric codes with 8+ characters (e.g., PO12345678). May be prefixed with 'PO-'.",
                         "items": {"type": "string"},
                     },
                 },
@@ -475,11 +475,14 @@ def extract_latest_email_text(text: str) -> str:
 
 def build_system_prompt() -> str:
     return (
-        "You are an order ETA assistant for a shared inbox. You will receive HTML Outlook emails. "
+        "You are processing an incoming logistics email thread. Analyze the contents below to determine if this is an ETA request.\n\n"
+        "The email content is structured with XML tags:\n"
+        "<email_body> contains the stripped/cleaned latest email text\n"
+        "<attachments> contains text extracted from PDFs/Excel files\n"
+        "<extracted_image_ocr> contains output from the parse_embedded_images vision step\n\n"
         "Only answer when the email is clearly an ETA or delivery timing request. "
         "Use your judgment to identify shipment references such as order numbers, truck codes, trailer codes, "
         "Bill of Lading (BOL), Purchase Orders (PO), and invoice references from the text. "
-        "The exact format can vary, so inspect the visible text carefully and extract any shipment identifiers you can find. "
         "When you call the lookup_eta tool, pass the identifiers in the appropriate list fields: orders, trucks, trailers, bols, and pos. "
         "If the email is not an ETA request, do nothing and return an empty response. "
         "Write a friendly, concise email reply that references the matched identifiers and ETA details."
@@ -533,7 +536,7 @@ def call_llm_api(client, email_text):
                 },
                 {
                     "role": "user",
-                    "content": f"Please answer this shared-inbox ETA request. Email text: {email_text}",
+                    "content": email_text,
                 },
             ],
             tools=TOOLS,
@@ -572,12 +575,16 @@ def answer_email(email_text: str, attachments: Optional[list] = None) -> str:
             if extracted:
                 attachment_texts.append(extracted)
 
-    # Combine all text sources
-    combined_text = processed_text
+    # Build structured context with XML tags for LLM clarity
+    context_parts = [processed_text]
     if image_descriptions:
-        combined_text += f"\n\n{image_descriptions}"
+        context_parts.append(f"\n<extracted_image_ocr>\n{image_descriptions}\n</extracted_image_ocr>")
     if attachment_texts:
-        combined_text += "\n\nAttachment contents:\n" + "\n".join(attachment_texts)
+        context_parts.append(f"\n<attachments>\n" + "\n".join(attachment_texts) + "\n</attachments>")
+
+    combined_text = f"<email_body>\n{processed_text}\n</email_body>"
+    for part in context_parts[1:]:
+        combined_text += part
 
     client = OpenAI(
         api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
@@ -825,7 +832,7 @@ def main() -> None:
         app.run(host="0.0.0.0", port=args.health_port)
     else:
         setup_logging()
-        email_text = args.email_text or "Hi, when will order A-1042 arrive?"
+        email_text = args.email_text or "Hi, when will order ABC1234 arrive?"
         answer = answer_email(email_text)
         print("\nReply:\n")
         print(answer)

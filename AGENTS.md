@@ -4,7 +4,7 @@
 
 ```powershell
 # Quick test with email text argument
-python EmailResponse.py "Hi, when will my order A-1042 arrive?"
+python EmailResponse.py "Hi, when will my order ABC1234 arrive?"
 
 # MS Graph mode (Client Credentials Flow - production)
 python EmailResponse.py --msgraph --tenant-id "your-tenant-id" --client-id "your-client-id" --client-secret "your-secret" --user-email "shared-inbox@company.com" --auto-reply --daemon --health-port 8080

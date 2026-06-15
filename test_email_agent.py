@@ -8,16 +8,24 @@ class EmailAgentTests(unittest.TestCase):
 
     def test_system_prompt_describes_email_and_identifier_rules(self):
         prompt = EmailResponse.build_system_prompt()
-        self.assertIn("HTML Outlook emails", prompt)
+        self.assertIn("<email_body>", prompt)
         self.assertIn("order numbers", prompt)
         self.assertIn("Bill of Lading", prompt)
         self.assertIn("lookup_eta tool", prompt)
         self.assertIn("orders, trucks, trailers, bols, and pos", prompt)
 
+    def test_tools_have_pattern_descriptions(self):
+        tools = EmailResponse.TOOLS
+        lookup_tool = tools[0]["function"]
+        props = lookup_tool["parameters"]["properties"]
+        self.assertIn("3 uppercase letters followed by 4 digits", props["orders"]["description"])
+        self.assertIn("6 alphanumeric characters", props["trucks"]["description"])
+        self.assertIn("distinguished from truck codes", props["trailers"]["description"])
+
     def test_strip_html_tags(self):
-        html = "<html><body><p>Hi, when will order A-1042 arrive?</p></body></html>"
+        html = "<html><body><p>Hi, when will order ABC1234 arrive?</p></body></html>"
         text = EmailResponse.strip_html_tags(html)
-        self.assertIn("order A-1042", text)
+        self.assertIn("order ABC1234", text)
         self.assertNotIn("<html>", text)
         self.assertNotIn("<p>", text)
 
@@ -26,13 +34,13 @@ class EmailAgentTests(unittest.TestCase):
         <html>
         <head><style>.hidden {display: none;}</style></head>
         <body>
-        <table><tr><td>Hi, when will order A-1042 arrive?</td></tr></table>
+        <table><tr><td>Hi, when will order ABC1234 arrive?</td></tr></table>
         <div class="hidden">Marketing banner</div>
         </body>
         </html>
         """
         text = EmailResponse.strip_html_tags(html)
-        self.assertIn("order A-1042", text)
+        self.assertIn("order ABC1234", text)
         self.assertNotIn("Marketing banner", text)
 
     def test_extract_text_from_pdf(self):
@@ -46,9 +54,9 @@ class EmailAgentTests(unittest.TestCase):
         self.assertIsInstance(result, str)
 
     def test_extract_text_from_csv(self):
-        csv_content = b"order,status\nA-1042,shipped\nB-7711,in transit"
+        csv_content = b"order,status\nABC1234,shipped\nDEF5678,in transit"
         result = EmailResponse.extract_text_from_csv(csv_content)
-        self.assertIn("A-1042", result)
+        self.assertIn("ABC1234", result)
 
     def test_parse_embedded_images_no_images(self):
         html = "<html><body><p>No images here</p></body></html>"
@@ -115,7 +123,7 @@ class EmailAgentTests(unittest.TestCase):
                     "subject": "Order ETA Request",
                     "from": {"emailAddress": {"address": "client@example.com"}},
                     "receivedDateTime": "2026-06-14T10:00:00Z",
-                    "body": {"content": "Hi, when will order A-1042 arrive?", "contentType": "text"},
+                    "body": {"content": "Hi, when will order ABC1234 arrive?", "contentType": "text"},
                     "hasAttachments": True,
                     "categories": []
                 }
@@ -194,8 +202,8 @@ class EmailAgentTests(unittest.TestCase):
             "Can you reset my password?\n\n"
             "-----Original Message-----\n"
             "From: client@example.com\n"
-            "Subject: when will order A-1042 arrive?\n"
-            "Hi, when will order A-1042 arrive?"
+            "Subject: when will order ABC1234 arrive?\n"
+            "Hi, when will order ABC1234 arrive?"
         )
         
         mock_msg = MagicMock()
@@ -209,8 +217,9 @@ class EmailAgentTests(unittest.TestCase):
         called_args = mock_call_llm.call_args[0]
         llm_input_text = called_args[1]
         
+        self.assertIn("<email_body>", llm_input_text)
         self.assertIn("Can you reset my password?", llm_input_text)
-        self.assertNotIn("order A-1042", llm_input_text)
+        self.assertNotIn("order ABC1234", llm_input_text)
 
 
 if __name__ == "__main__":
